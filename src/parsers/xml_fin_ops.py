@@ -8,12 +8,7 @@ import re
 import logging
 
 from src.OperationDTO import OperationDTO
-from src.constants import (
-    SKIP_OPERATIONS,
-    VALID_OPERATIONS,
-    OPERATION_TYPE_MAP,
-    SPECIAL_OPERATION_HANDLERS,
-)
+from src.constants import SKIP_OPERATIONS
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -21,11 +16,12 @@ logging.basicConfig(level=logging.INFO)
 # --- regexes / heuristics ---
 RE_ISIN = re.compile(r"\b[A-Z]{2}[A-Z0-9]{10}\b")
 RE_LONG_DIGITS = re.compile(r"\b(\d{5,})\b")
-RE_OPERATION_ID = RE_LONG_DIGITS  # reuse for operation id
-# match digits between hyphens like 4B02-02-00116-L  -> capture 00116 (leading zeros preserved)
-RE_REG_HYPHEN = re.compile(r"-0*([0-9]{2,})-")
-# fallback smaller group (2..4) if needed
-RE_REG_HYPHEN_MIN2 = re.compile(r"-([0-9]{2,})-")
+RE_OPERATION_ID = RE_LONG_DIGITS
+RE_REG_NUMBER = re.compile(
+    r"\b[0-9][0-9A-ZА-Я]{0,7}[-/][0-9A-ZА-Я\-\/]*\d[0-9A-ZА-Я\-\/]*\b",
+    re.IGNORECASE
+)
+
 
 # --- helpers ---
 def _local_name(tag: str) -> str:
@@ -34,10 +30,10 @@ def _local_name(tag: str) -> str:
         return ""
     return tag.split("}")[-1] if "}" in tag else tag
 
+
 def _safe_attr(elem: Optional[ET.Element], name: str) -> Optional[str]:
     if elem is None:
         return None
-    # attribute names are usually not namespaced in these reports
     v = elem.attrib.get(name)
     if v is None:
         v = elem.attrib.get(name.lower())
@@ -45,6 +41,7 @@ def _safe_attr(elem: Optional[ET.Element], name: str) -> Optional[str]:
         return None
     v = v.strip()
     return v if v != "" else None
+
 
 def _parse_decimal(v: Optional[str]) -> Optional[Decimal]:
     if v is None:
@@ -59,6 +56,7 @@ def _parse_decimal(v: Optional[str]) -> Optional[Decimal]:
         except Exception:
             return None
 
+
 def _decimal_to_float(d: Optional[Decimal]) -> float:
     if d is None:
         return 0.0
@@ -69,6 +67,7 @@ def _decimal_to_float(d: Optional[Decimal]) -> float:
             return float(str(d))
         except Exception:
             return 0.0
+
 
 def _parse_iso_datetime(v: Optional[str]) -> Optional[datetime]:
     if not v:
@@ -81,6 +80,7 @@ def _parse_iso_datetime(v: Optional[str]) -> Optional[datetime]:
         except Exception:
             return None
 
+
 def _collect_elements_by_local_name(root: ET.Element, local: str) -> List[ET.Element]:
     """Return all descendant elements whose local name equals `local` (namespace-agnostic)."""
     out = []
@@ -89,11 +89,13 @@ def _collect_elements_by_local_name(root: ET.Element, local: str) -> List[ET.Ele
             out.append(el)
     return out
 
+
 def _find_first_descendant_by_local_name(root: ET.Element, local: str) -> Optional[ET.Element]:
     for el in root.iter():
         if _local_name(el.tag) == local:
             return el
     return None
+
 
 def _collect_p_code_candidates(elem: Optional[ET.Element]) -> List[Dict[str, str]]:
     res = []
@@ -103,6 +105,7 @@ def _collect_p_code_candidates(elem: Optional[ET.Element]) -> List[Dict[str, str
         if _local_name(p.tag) == "p_code":
             res.append(dict(p.attrib))
     return res
+
 
 def _extract_currency_and_amount(comment_elem: Optional[ET.Element]) -> (str, Optional[Decimal], Dict[str, Any]):
     candidates = _collect_p_code_candidates(comment_elem)
@@ -117,6 +120,7 @@ def _extract_currency_and_amount(comment_elem: Optional[ET.Element]) -> (str, Op
         if vol and amount is None:
             amount = _parse_decimal(vol.strip())
     return currency or "", amount, debug
+
 
 def _extract_textbox_values(comment_elem: Optional[ET.Element]) -> Dict[str, Optional[str]]:
     res = {"money_volume": None, "all_volume": None, "debet_volume": None, "acc_code": None}
@@ -142,48 +146,99 @@ def _extract_textbox_values(comment_elem: Optional[ET.Element]) -> Dict[str, Opt
                 res["acc_code"] = ac.strip()
     return res
 
+
 def _extract_reg_and_opid_improved(comment_text: Optional[str], oper_type_text: Optional[str]) -> (str, str):
     """
-    Improved logic to extract reg_number and operation_id:
-    - reg_number: first try RE_REG_HYPHEN (digits between hyphens, e.g. 4B02-02-00116-L -> 00116),
-                  then fallback to long digit sequence (>=5 digits) from comment.
-    - operation_id: prefer long digit sequence (>=5) from oper_type, else from comment.
+    Extract reg_number from comment text.
+    - reg_number: извлекаем полный номер вида 4B02-01-00965-B-001P или 1-04-33498-E
+    - operation_id: не используется для финансовых операций (всегда пустой)
     Returns (reg_number, operation_id) as strings (possibly empty).
     """
     reg = ""
-    opid = ""
+    opid = ""  # не используется для финансовых операций
 
     if comment_text:
-        # try hyphen-based reg extraction
-        m = RE_REG_HYPHEN.search(comment_text)
+        # Извлекаем полный регистрационный номер
+        m = RE_REG_NUMBER.search(comment_text)
         if m:
-            reg = m.group(1)
-        else:
-            m2 = RE_REG_HYPHEN_MIN2.search(comment_text)
-            if m2:
-                reg = m2.group(1)
+            reg = m.group(0)  # весь найденный паттерн
 
-    # operation id preference: from oper_type first
-    if oper_type_text:
-        mo = RE_OPERATION_ID.search(oper_type_text)
-        if mo:
-            opid = mo.group(1)
+    return reg or "", opid
 
-    # if no opid found in oper_type, try comment
-    if not opid and comment_text:
-        mo2 = RE_OPERATION_ID.search(comment_text)
-        if mo2:
-            opid = mo2.group(1)
 
-    # fallback reg: if not set yet, and there's a long digit in comment, use it
-    if not reg and comment_text:
-        mlong = RE_LONG_DIGITS.search(comment_text)
-        if mlong:
-            # ensure not to take opid if opid already present and same substring? still use first for reg
-            reg = mlong.group(1)
+def _determine_operation_type(oper_type_val: str, comment_text: str, payment_sum: float) -> str:
+    """
+    Определяет тип операции на основе oper_type и комментария.
+    Возвращает mapped operation_type строку.
+    """
+    oper_lower = oper_type_val.lower()
+    comment_lower = comment_text.lower()
 
-    # final normalization: keep as-is (preserve leading zeros from hyphen pattern).
-    return reg or "", opid or ""
+    # 1. НДФЛ - зависит от знака суммы
+    if "ндфл" in oper_lower:
+        return "refund" if payment_sum > 0 else "withholding"
+
+    # 2. Перевод - смотрим в комментарий
+    if "перевод" in oper_lower:
+        if "погашение купона" in comment_lower or "погашением купона" in comment_lower:
+            return "coupon"
+        elif "частичное погашение номинала" in comment_lower or "частичном погашении номинала" in comment_lower:
+            return "amortization"
+        elif "полное погашение номинала" in comment_lower or "полном погашении номинала" in comment_lower:
+            return "repayment"
+        elif "из ао \"альфа-банк" in comment_lower or "из ао альфа-банк" in comment_lower:
+            return "deposit"
+        elif "дивиденд" in comment_lower:
+            return "dividend"
+        elif "списание по поручению клиента" in comment_lower:
+            return "withdrawal"
+        elif "возврат средств по дог" in comment_lower:
+            return "withdrawal"
+        elif "выплата по поручению клиента в рамках акция" in comment_lower:
+            return "other_income"
+        # Пропускаем промежуточные дивиденды
+        elif "выплата промежуточных дивидендов" in comment_lower:
+            return "_skip_"
+        # Fallback для переводов
+        return "transfer"
+
+    # 3. Дивиденды
+    if "дивиденд" in oper_lower or "дивиденд" in comment_lower:
+        return "dividend"
+
+    # 4. Купоны
+    if "купон" in oper_lower or "купон" in comment_lower:
+        return "coupon"
+
+    # 5. Погашение облигации
+    if "погашение облигации" in oper_lower or "погашение облигации" in comment_lower:
+        return "repayment"
+
+    # 6. Частичное погашение
+    if "частичное погашение" in oper_lower or "частичное погашение" in comment_lower:
+        return "amortization"
+
+    # 7. Приход/Вывод ДС
+    if "приход дс" in oper_lower:
+        return "deposit"
+    if "вывод дс" in oper_lower:
+        return "withdrawal"
+
+    # 8. Комиссии
+    if "комисси" in oper_lower:
+        return "commission_refund" if payment_sum > 0 else "commission"
+
+    # 9. Проценты по займам
+    if "проценты по займам" in oper_lower:
+        return "other_income" if payment_sum != 0 else "other_expense"
+
+    # 10. Вознаграждение компании
+    if "вознаграждение компании" in oper_lower:
+        return "other_income"
+
+    # Fallback: возвращаем оригинальный oper_type
+    return oper_type_val or "unknown"
+
 
 # --- main parsing logic (namespace-agnostic) ---
 def _parse_root(root: ET.Element) -> Tuple[List[OperationDTO], Dict[str, Any]]:
@@ -256,23 +311,13 @@ def _parse_root(root: ET.Element) -> Tuple[List[OperationDTO], Dict[str, Any]]:
                     elif textbox.get("debet_volume"):
                         amount_decimal = _parse_decimal(textbox.get("debet_volume"))
 
-                payment_sum = 0.0
+                payment_sum = _decimal_to_float(amount_decimal) if amount_decimal is not None else 0.0
                 commission_val = 0.0
-                if amount_decimal is not None:
-                    # detect commission-like operations by oper_type text
-                    is_commission = False
-                    if oper_type_val and "комисси" in oper_type_val.lower():
-                        is_commission = True
-                    if is_commission:
-                        commission_val = abs(_decimal_to_float(amount_decimal))
-                        payment_sum = 0.0
-                    else:
-                        payment_sum = _decimal_to_float(amount_decimal)
 
                 # improved reg_number & operation_id extraction
                 reg_number, operation_id = _extract_reg_and_opid_improved(comment_text, oper_type_val)
 
-                # ticker: user requested blank ticker when not reliable
+                # ticker: blank when not reliable
                 ticker = ""
 
                 # isin heuristic (keep empty if not found)
@@ -282,21 +327,22 @@ def _parse_root(root: ET.Element) -> Tuple[List[OperationDTO], Dict[str, Any]]:
                     if m_isin:
                         isin = m_isin.group(0)
 
-                # decide label source for skip/mapping (use oper_type primarily, fallback comment)
+                # decide label source for skip/mapping
                 label_source = (oper_type_val or "").strip() or (comment_text or "").strip()
 
-                # 1) skip by SKIP_OPERATIONS (case-insensitive substring match)
+                # 1) Проверка на SKIP_OPERATIONS (case-insensitive substring match)
                 should_skip = False
                 if label_source:
                     low = label_source.lower()
                     for skip_pattern in SKIP_OPERATIONS:
                         if skip_pattern.lower() in low:
                             should_skip = True
-                            logger.debug("Skipping operation by SKIP_OPERATIONS match: %s (pattern=%s)", label_source, skip_pattern)
+                            logger.debug("Skipping operation by SKIP_OPERATIONS match: %s (pattern=%s)", label_source,
+                                         skip_pattern)
                             break
 
-                # also optionally skip when label empty and zero amounts
-                if not label_source and (payment_sum == 0.0 and commission_val == 0.0):
+                # также пропускаем пустые операции с нулевыми суммами
+                if not label_source and payment_sum == 0.0:
                     should_skip = True
                     logger.debug("Skipping empty/zero operation (no label, zero amount)")
 
@@ -304,37 +350,14 @@ def _parse_root(root: ET.Element) -> Tuple[List[OperationDTO], Dict[str, Any]]:
                     skipped_count += 1
                     continue
 
-                # 2) map operation_type using OPERATION_TYPE_MAP and SPECIAL_OPERATION_HANDLERS
-                mapped_type = None
-                # try direct mapping
-                if label_source in OPERATION_TYPE_MAP:
-                    mapped_type = OPERATION_TYPE_MAP[label_source]
-                # try substring matching
-                if mapped_type is None:
-                    for k, v in OPERATION_TYPE_MAP.items():
-                        if k.lower() in label_source.lower():
-                            mapped_type = v
-                            break
+                # 2) Определение operation_type с новой логикой
+                mapped_type = _determine_operation_type(oper_type_val, comment_text, payment_sum)
 
-                # special handlers
-                if mapped_type is None:
-                    for k, handler in SPECIAL_OPERATION_HANDLERS.items():
-                        if k.lower() in label_source.lower():
-                            try:
-                                mapped_type = handler(payment_sum, None)
-                            except Exception as ex:
-                                logger.exception("SPECIAL_OPERATION_HANDLERS failed for %s: %s", k, ex)
-                            break
-
-                # fallback: if label matches VALID_OPERATIONS use it (or substring)
-                if mapped_type is None:
-                    for k in VALID_OPERATIONS:
-                        if k.lower() in label_source.lower():
-                            mapped_type = k
-                            break
-
-                if mapped_type is None:
-                    mapped_type = label_source or ""
+                # Специальная метка для пропуска
+                if mapped_type == "_skip_":
+                    skipped_count += 1
+                    logger.debug("Skipping operation: %s (промежуточные дивиденды)", comment_text[:50])
+                    continue
 
                 # date field prefer settlement_date else rn_last_update
                 date_field = settlement_date_dt or rn_last_update_dt
@@ -363,6 +386,7 @@ def _parse_root(root: ET.Element) -> Tuple[List[OperationDTO], Dict[str, Any]]:
 
     stats = {"total_rows": total_rn, "parsed": len(ops), "skipped": skipped_count, "example_comments": example_comments}
     return ops, stats
+
 
 # --- public API ---
 def parse_fin_operations_from_xml(path_or_bytes: Union[str, bytes]) -> Tuple[List[OperationDTO], Dict[str, Any]]:
