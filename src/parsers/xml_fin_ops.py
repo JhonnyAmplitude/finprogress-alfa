@@ -247,6 +247,21 @@ def _parse_root(root: ET.Element) -> Tuple[List[OperationDTO], Dict[str, Any]]:
     skipped_count = 0
     example_comments: List[str] = []
 
+    # накопители сумм
+    totals_by_mapped_type: Dict[str, Decimal] = {}
+    totals_by_label: Dict[str, Decimal] = {}
+    total_income = Decimal("0")
+    total_expense = Decimal("0")
+
+    def _dec_to_str(d: Decimal) -> str:
+        # форматируем Decimal с 10 знаками после запятой, сохраняем знак
+        try:
+            q = d.quantize(Decimal("0.0000000001"))
+            # normalize -> but keep trailing zeros; use format with 'f'
+            return format(q, "f")
+        except Exception:
+            return str(d)
+
     try:
         # find Report element with name or fallback to root
         report_elem = None
@@ -311,6 +326,10 @@ def _parse_root(root: ET.Element) -> Tuple[List[OperationDTO], Dict[str, Any]]:
                     elif textbox.get("debet_volume"):
                         amount_decimal = _parse_decimal(textbox.get("debet_volume"))
 
+                # ensure we have Decimal 0 if still None
+                if amount_decimal is None:
+                    amount_decimal = Decimal("0")
+
                 payment_sum = _decimal_to_float(amount_decimal) if amount_decimal is not None else 0.0
                 commission_val = 0.0
 
@@ -342,7 +361,7 @@ def _parse_root(root: ET.Element) -> Tuple[List[OperationDTO], Dict[str, Any]]:
                             break
 
                 # также пропускаем пустые операции с нулевыми суммами
-                if not label_source and payment_sum == 0.0:
+                if not label_source and float(amount_decimal) == 0.0:
                     should_skip = True
                     logger.debug("Skipping empty/zero operation (no label, zero amount)")
 
@@ -380,11 +399,46 @@ def _parse_root(root: ET.Element) -> Tuple[List[OperationDTO], Dict[str, Any]]:
 
                 ops.append(dto)
 
+                # --- accumulate totals ---
+                try:
+                    totals_by_mapped_type[mapped_type] = totals_by_mapped_type.get(mapped_type, Decimal("0")) + amount_decimal
+                except Exception:
+                    totals_by_mapped_type[mapped_type] = Decimal("0") + amount_decimal
+
+                label_key = (oper_type_val or "").strip() or (comment_text.splitlines()[0].strip() if comment_text else "")
+                if label_key:
+                    totals_by_label[label_key] = totals_by_label.get(label_key, Decimal("0")) + amount_decimal
+
+                # income / expense totals (sign-aware)
+                if amount_decimal > 0:
+                    total_income += amount_decimal
+                elif amount_decimal < 0:
+                    total_expense += amount_decimal
+
     except Exception as e:
         logger.exception("Error while parsing financial operations: %s", e)
-        return [], {"total_rows": total_rn, "parsed": len(ops), "skipped": skipped_count, "error": str(e)}
+        return [], {
+            "total_rows": total_rn,
+            "parsed": len(ops),
+            "skipped": skipped_count,
+            "error": str(e)
+        }
 
-    stats = {"total_rows": total_rn, "parsed": len(ops), "skipped": skipped_count, "example_comments": example_comments}
+    # prepare readable dicts (Decimal -> str with 10 decimals)
+    amounts_by_mapped_type_out = {k: _dec_to_str(v) for k, v in totals_by_mapped_type.items()}
+    amounts_by_label_out = {k: _dec_to_str(v) for k, v in totals_by_label.items()}
+
+    stats = {
+        "total_rows": total_rn,
+        "parsed": len(ops),
+        "skipped": skipped_count,
+        "example_comments": example_comments,
+        # new summary fields:
+        "amounts_by_mapped_type": amounts_by_mapped_type_out,
+        "amounts_by_label": amounts_by_label_out,
+        "total_income": _dec_to_str(total_income),
+        "total_expense": _dec_to_str(total_expense),
+    }
     return ops, stats
 
 
