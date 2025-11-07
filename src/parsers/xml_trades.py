@@ -12,11 +12,13 @@ ISIN_RE = re.compile(r"[A-Z]{2}[A-Z0-9]{9}\d", re.IGNORECASE)
 DATE_TIME_RE = re.compile(r"\d{2}\.\d{2}\.\d{4}\s+\d{2}:\d{2}:\d{2}")
 DATE_TIME_SHORT_RE = re.compile(r"\d{2}\.\d{2}\.\d{4}\s+\d{2}:\d{2}")
 
+
 def _local_name(tag: str) -> str:
     """Возвращает локальное имя тега без namespace."""
     if tag is None:
         return ""
     return tag.split("}")[-1] if "}" in tag else tag
+
 
 def to_float_safe(v: Any) -> float:
     if v is None:
@@ -33,12 +35,14 @@ def to_float_safe(v: Any) -> float:
         except Exception:
             return 0.0
 
+
 def to_int_safe(v: Any) -> int:
     try:
         f = to_float_safe(v)
         return int(round(float(f)))
     except Exception:
         return 0
+
 
 def parse_datetime_from_text(s: Optional[str]) -> Optional[datetime]:
     if not s:
@@ -64,11 +68,13 @@ def parse_datetime_from_text(s: Optional[str]) -> Optional[datetime]:
             continue
     return None
 
+
 def extract_isin_from_attr(s: Optional[str]) -> str:
     if not s:
         return ""
     m = ISIN_RE.search(str(s))
     return m.group(0).upper() if m else str(s).strip()
+
 
 def extract_ticker_from_name(name: Optional[str]) -> str:
     if not name:
@@ -78,8 +84,34 @@ def extract_ticker_from_name(name: Optional[str]) -> str:
         return tok
     return ""
 
+
+def extract_first_trade_no(trade_no_raw: Optional[str]) -> str:
+    """
+    Извлекает первый номер сделки из строки.
+    Примеры:
+      "14533071091\r\n1280737003" -> "14533071091"
+      "12087770319 907346105" -> "12087770319"
+      "123456" -> "123456"
+    """
+    if not trade_no_raw:
+        return ""
+
+    # Удаляем лишние пробелы и переносы строк
+    cleaned = str(trade_no_raw).strip()
+
+    # Разбиваем по пробелам, табам, переносам строк
+    parts = re.split(r'[\s\r\n\t]+', cleaned)
+
+    # Берём первую часть (первый номер)
+    if parts and parts[0]:
+        return parts[0].strip()
+
+    return ""
+
+
 def _normalize_attrib(attrib: Dict[str, str]) -> Dict[str, str]:
     return {k.lower(): v for k, v in attrib.items()}
+
 
 def parse_trades_from_xml(path_or_bytes: str | bytes) -> Tuple[List[OperationDTO], Dict[str, Any]]:
     """
@@ -125,7 +157,8 @@ def parse_trades_from_xml(path_or_bytes: str | bytes) -> Tuple[List[OperationDTO
             attrib = _normalize_attrib(attrib_raw)  # lowercased keys
 
             # quantity
-            qty = to_int_safe(attrib.get("qty") or attrib.get("quantity") or attrib.get("textbox14") or attrib.get("qty "))
+            qty = to_int_safe(
+                attrib.get("qty") or attrib.get("quantity") or attrib.get("textbox14") or attrib.get("qty "))
             if qty == 0:
                 stats["skipped_no_qty"] += 1
                 elem.clear()
@@ -145,7 +178,9 @@ def parse_trades_from_xml(path_or_bytes: str | bytes) -> Tuple[List[OperationDTO
 
             # price / totals / nkd / currency
             price = to_float_safe(attrib.get("price") or attrib.get("textbox25") or attrib.get("price "))
-            total = to_float_safe(attrib.get("summ_trade") or attrib.get("summtrade") or attrib.get("summ_trade".lower()) or attrib.get("summ_trade"))
+            total = to_float_safe(
+                attrib.get("summ_trade") or attrib.get("summtrade") or attrib.get("summ_trade".lower()) or attrib.get(
+                    "summ_trade"))
             nkd = to_float_safe(attrib.get("summ_nkd") or attrib.get("summnkd") or attrib.get("summ_nkd".lower()))
             currency = (attrib.get("curr_calc") or attrib.get("curr") or attrib.get("textbox14") or "").strip()
             if currency.upper() in ("RUR", "РУБ", "РУБЛЬ"):
@@ -155,7 +190,10 @@ def parse_trades_from_xml(path_or_bytes: str | bytes) -> Tuple[List[OperationDTO
             isin = extract_isin_from_attr(attrib.get("isin_reg") or attrib.get("isin1") or attrib.get("isin"))
             p_name = attrib.get("p_name") or attrib.get("pname") or attrib.get("active_name") or ""
             ticker = extract_ticker_from_name(p_name)
-            trade_no = (attrib.get("trade_no") or attrib.get("tradeno") or attrib.get("trade")) or ""
+
+            # Извлекаем первый номер сделки
+            trade_no_raw = (attrib.get("trade_no") or attrib.get("tradeno") or attrib.get("trade")) or ""
+            trade_no = extract_first_trade_no(trade_no_raw)
 
             # commission
             commission = to_float_safe(attrib.get("bank_tax") or attrib.get("banktax") or attrib.get("bank_tax"))
@@ -177,7 +215,7 @@ def parse_trades_from_xml(path_or_bytes: str | bytes) -> Tuple[List[OperationDTO
                     quantity=int(round(abs(float(qty)))),
                     aci=nkd,
                     comment=str(attrib.get("place_name") or attrib.get("place") or ""),
-                    operation_id=str(trade_no),
+                    operation_id=trade_no,  # Только первый номер
                     commission=float(commission),
                 )
                 ops.append(dto)
@@ -200,5 +238,6 @@ def parse_trades_from_xml(path_or_bytes: str | bytes) -> Tuple[List[OperationDTO
             except Exception:
                 pass
 
-    logger.info("Parsed %s trades (checked %s rows). total_commission=%s", stats["parsed"], stats["total_rows"], stats["total_commission"])
+    logger.info("Parsed %s trades (checked %s rows). total_commission=%s", stats["parsed"], stats["total_rows"],
+                stats["total_commission"])
     return ops, stats

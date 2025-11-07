@@ -44,9 +44,42 @@ def _dedupe_ops(ops: List[OperationDTO]) -> Tuple[List[OperationDTO], int]:
     return deduped, len(deduped)
 
 
+def _sort_key_for_operation(op_dict: Dict[str, Any]) -> tuple:
+    """
+    Ключ сортировки для операции.
+    Сортируем по:
+    1. Дате (datetime или строка)
+    2. Типу операции (строка) - для стабильности сортировки при одинаковых датах
+
+    Возвращает кортеж (datetime_obj, operation_type)
+    """
+    date_val = op_dict.get("date")
+    op_type = op_dict.get("operation_type", "")
+
+    # Преобразуем дату в datetime для корректной сортировки
+    if isinstance(date_val, datetime):
+        dt = date_val
+    elif isinstance(date_val, str):
+        try:
+            # Пробуем распарсить ISO формат
+            dt = datetime.fromisoformat(date_val)
+        except Exception:
+            try:
+                # Пробуем другие форматы
+                dt = datetime.strptime(date_val.split()[0], "%d.%m.%Y")
+            except Exception:
+                # Если не удалось - ставим минимальную дату
+                dt = datetime.min
+    else:
+        dt = datetime.min
+
+    return (dt, op_type)
+
+
 def parse_full_statement_xml(path_or_bytes: Union[str, bytes]) -> Dict[str, Any]:
     """
     Parse trades + financial operations from XML source (path or bytes).
+    Возвращает операции отсортированные по дате.
     """
     logger.info("Starting full XML parse for %s", str(path_or_bytes)[:200])
 
@@ -70,8 +103,19 @@ def parse_full_statement_xml(path_or_bytes: Union[str, bytes]) -> Dict[str, Any]
     deduped_fin, after_dedupe_fin = _dedupe_ops(fin_ops)
     deduped_trades, after_dedupe_trades = _dedupe_ops(trades)
 
-    # combine operations: keep financial ops first (so ordering in earlier UX preserved)
-    combined_ops = [o.to_dict() for o in deduped_fin] + [o.to_dict() for o in deduped_trades]
+    # combine operations: финансовые операции + сделки
+    combined_ops_dto = deduped_fin + deduped_trades
+
+    # Конвертируем в словари
+    combined_ops = [o.to_dict() for o in combined_ops_dto]
+
+    # Сортируем по дате
+    try:
+        combined_ops.sort(key=_sort_key_for_operation)
+        logger.info("Operations sorted by date successfully")
+    except Exception as e:
+        logger.warning("Failed to sort operations by date: %s", e)
+        # Продолжаем работу с несортированными операциями
 
     # meta assembly
     meta: Dict[str, Any] = {
@@ -86,7 +130,7 @@ def parse_full_statement_xml(path_or_bytes: Union[str, bytes]) -> Dict[str, Any]
 
     # helper short summary log similar to CLI output
     logger.info(
-        "%s parsed: fin=%s (raw=%s -> deduped=%s), trades=%s (raw=%s -> deduped=%s), total_ops=%s",
+        "%s parsed: fin=%s (raw=%s -> deduped=%s), trades=%s (raw=%s -> deduped=%s), total_ops=%s (sorted by date)",
         "XML full parse summary",
         meta["fin_ops_stats"].get("parsed", len(deduped_fin)),
         fin_raw_count,

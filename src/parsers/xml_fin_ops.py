@@ -1,6 +1,6 @@
 # src/parsers/xml_fin_ops.py
 from __future__ import annotations
-from typing import Optional, List, Dict, Any, Tuple, Union
+from typing import Optional, List, Dict, Any, Tuple, Union, Callable
 from datetime import datetime
 import xml.etree.ElementTree as ET
 from decimal import Decimal, InvalidOperation
@@ -8,19 +8,36 @@ import re
 import logging
 
 from src.OperationDTO import OperationDTO
-from src.constants import SKIP_OPERATIONS
+from src.constants import SKIP_OPERATIONS, OPERATION_TYPE_MAP
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
-# --- regexes / heuristics ---
+
 RE_ISIN = re.compile(r"\b[A-Z]{2}[A-Z0-9]{10}\b")
-RE_LONG_DIGITS = re.compile(r"\b(\d{5,})\b")
-RE_OPERATION_ID = RE_LONG_DIGITS
 RE_REG_NUMBER = re.compile(
     r"\b[0-9][0-9A-ZА-Я]{0,7}[-/][0-9A-ZА-Я\-\/]*\d[0-9A-ZА-Я\-\/]*\b",
     re.IGNORECASE
 )
+
+TRANSFER_COMMENT_PATTERNS = {
+    "coupon": ["погашение купона", "погашением купона"],
+    "amortization": ["частичное погашение номинала", "частичном погашении номинала"],
+    "repayment": ["полное погашение номинала", "полном погашении номинала"],
+    "deposit": ["из ао \"альфа-банк", "из ао альфа-банк"],
+    "dividend": ["дивиденд"],
+    "withdrawal": ["списание по поручению клиента", "возврат средств по дог"],
+    "other_income": ["выплата по поручению клиента в рамках"],
+    "_skip_": ["перевод денежных средств"],
+}
+
+# --- Специальные обработчики с динамическим типом (зависит от суммы) ---
+# Callable принимает (operation_name, payment_sum, comment) -> operation_type
+DYNAMIC_TYPE_HANDLERS: Dict[str, Callable[[str, float, str], str]] = {
+    "НДФЛ": lambda name, amount, comment: "refund" if amount > 0 else "withholding",
+    "Комиссия": lambda name, amount, comment: "commission_refund" if amount > 0 else "commission",
+    "Проценты по займам": lambda name, amount, comment: "other_income" if amount != 0 else "other_expense",
+}
 
 
 # --- helpers ---
@@ -147,97 +164,72 @@ def _extract_textbox_values(comment_elem: Optional[ET.Element]) -> Dict[str, Opt
     return res
 
 
-def _extract_reg_and_opid_improved(comment_text: Optional[str], oper_type_text: Optional[str]) -> (str, str):
+def _extract_reg_number(comment_text: Optional[str]) -> str:
     """
     Extract reg_number from comment text.
-    - reg_number: извлекаем полный номер вида 4B02-01-00965-B-001P или 1-04-33498-E
-    - operation_id: не используется для финансовых операций (всегда пустой)
-    Returns (reg_number, operation_id) as strings (possibly empty).
+    Извлекаем полный номер вида 4B02-01-00965-B-001P или 1-04-33498-E
     """
-    reg = ""
-    opid = ""  # не используется для финансовых операций
+    if not comment_text:
+        return ""
 
-    if comment_text:
-        # Извлекаем полный регистрационный номер
-        m = RE_REG_NUMBER.search(comment_text)
-        if m:
-            reg = m.group(0)  # весь найденный паттерн
-
-    return reg or "", opid
+    m = RE_REG_NUMBER.search(comment_text)
+    if m:
+        return m.group(0)
+    return ""
 
 
 def _determine_operation_type(oper_type_val: str, comment_text: str, payment_sum: float) -> str:
     """
     Определяет тип операции на основе oper_type и комментария.
-    Возвращает mapped operation_type строку.
+
+    Приоритет:
+    1. Проверка динамических обработчиков (НДФЛ, Комиссии и т.д.)
+    2. Маппинг из OPERATION_TYPE_MAP (прямое совпадение или подстрока)
+    3. Специальная обработка "Перевод" по комментарию
+    4. Fallback на оригинальный oper_type
     """
     oper_lower = oper_type_val.lower()
     comment_lower = comment_text.lower()
 
-    # 1. НДФЛ - зависит от знака суммы
-    if "ндфл" in oper_lower:
-        return "refund" if payment_sum > 0 else "withholding"
+    # 1. Проверка динамических обработчиков
+    for pattern, handler in DYNAMIC_TYPE_HANDLERS.items():
+        if pattern.lower() in oper_lower:
+            try:
+                return handler(oper_type_val, payment_sum, comment_text)
+            except Exception as e:
+                logger.warning("Dynamic handler failed for '%s': %s", pattern, e)
 
-    # 2. Перевод - смотрим в комментарий
+    # 2. Прямой маппинг из OPERATION_TYPE_MAP
+    # Сначала точное совпадение
+    if oper_type_val in OPERATION_TYPE_MAP:
+        return OPERATION_TYPE_MAP[oper_type_val]
+
+    # Затем поиск подстроки
+    for key, mapped_type in OPERATION_TYPE_MAP.items():
+        if key.lower() in oper_lower:
+            return mapped_type
+
+    # 3. Специальная обработка "Перевод" - анализируем комментарий
     if "перевод" in oper_lower:
-        if "погашение купона" in comment_lower or "погашением купона" in comment_lower:
-            return "coupon"
-        elif "частичное погашение номинала" in comment_lower or "частичном погашении номинала" in comment_lower:
-            return "amortization"
-        elif "полное погашение номинала" in comment_lower or "полном погашении номинала" in comment_lower:
-            return "repayment"
-        elif "из ао \"альфа-банк" in comment_lower or "из ао альфа-банк" in comment_lower:
-            return "deposit"
-        elif "дивиденд" in comment_lower:
-            return "dividend"
-        elif "списание по поручению клиента" in comment_lower:
-            return "withdrawal"
-        elif "возврат средств по дог" in comment_lower:
-            return "withdrawal"
-        elif "выплата по поручению клиента в рамках акция" in comment_lower:
-            return "other_income"
-        # Пропускаем промежуточные дивиденды
-        elif "выплата промежуточных дивидендов" in comment_lower:
-            return "_skip_"
-        # Fallback для переводов
+        # Проходим по паттернам комментариев
+        for op_type, patterns in TRANSFER_COMMENT_PATTERNS.items():
+            for pattern in patterns:
+                if pattern in comment_lower:
+                    return op_type
+
+        # Fallback для переводов без специфичного паттерна
         return "transfer"
 
-    # 3. Дивиденды
-    if "дивиденд" in oper_lower or "дивиденд" in comment_lower:
-        return "dividend"
+    # 4. Дополнительная проверка по комментарию для операций без явного типа
+    # (на случай если oper_type пустой, но комментарий информативен)
+    if not oper_type_val or oper_type_val.strip() == "":
+        for op_type, patterns in TRANSFER_COMMENT_PATTERNS.items():
+            for pattern in patterns:
+                if pattern in comment_lower:
+                    return op_type
 
-    # 4. Купоны
-    if "купон" in oper_lower or "купон" in comment_lower:
-        return "coupon"
-
-    # 5. Погашение облигации
-    if "погашение облигации" in oper_lower or "погашение облигации" in comment_lower:
-        return "repayment"
-
-    # 6. Частичное погашение
-    if "частичное погашение" in oper_lower or "частичное погашение" in comment_lower:
-        return "amortization"
-
-    # 7. Приход/Вывод ДС
-    if "приход дс" in oper_lower:
-        return "deposit"
-    if "вывод дс" in oper_lower:
-        return "withdrawal"
-
-    # 8. Комиссии
-    if "комисси" in oper_lower:
-        return "commission_refund" if payment_sum > 0 else "commission"
-
-    # 9. Проценты по займам
-    if "проценты по займам" in oper_lower:
-        return "other_income" if payment_sum != 0 else "other_expense"
-
-    # 10. Вознаграждение компании
-    if "вознаграждение компании" in oper_lower:
-        return "other_income"
-
-    # Fallback: возвращаем оригинальный oper_type
-    return oper_type_val or "unknown"
+    # 5. Fallback: возвращаем оригинальный oper_type или unknown
+    return oper_type_val.strip() if oper_type_val.strip() else "unknown"
 
 
 # --- main parsing logic (namespace-agnostic) ---
@@ -247,17 +239,16 @@ def _parse_root(root: ET.Element) -> Tuple[List[OperationDTO], Dict[str, Any]]:
     skipped_count = 0
     example_comments: List[str] = []
 
-    # накопители сумм
+    # Накопители сумм
     totals_by_mapped_type: Dict[str, Decimal] = {}
     totals_by_label: Dict[str, Decimal] = {}
     total_income = Decimal("0")
     total_expense = Decimal("0")
 
     def _dec_to_str(d: Decimal) -> str:
-        # форматируем Decimal с 10 знаками после запятой, сохраняем знак
+        """Форматируем Decimal с 4 знаками после запятой"""
         try:
-            q = d.quantize(Decimal("0.0000000001"))
-            # normalize -> but keep trailing zeros; use format with 'f'
+            q = d.quantize(Decimal("0.0001"))
             return format(q, "f")
         except Exception:
             return str(d)
@@ -330,11 +321,11 @@ def _parse_root(root: ET.Element) -> Tuple[List[OperationDTO], Dict[str, Any]]:
                 if amount_decimal is None:
                     amount_decimal = Decimal("0")
 
-                payment_sum = _decimal_to_float(amount_decimal) if amount_decimal is not None else 0.0
+                payment_sum = _decimal_to_float(amount_decimal)
                 commission_val = 0.0
 
-                # improved reg_number & operation_id extraction
-                reg_number, operation_id = _extract_reg_and_opid_improved(comment_text, oper_type_val)
+                # extract reg_number (operation_id не используется для финансовых операций)
+                reg_number = _extract_reg_number(comment_text)
 
                 # ticker: blank when not reliable
                 ticker = ""
@@ -356,8 +347,8 @@ def _parse_root(root: ET.Element) -> Tuple[List[OperationDTO], Dict[str, Any]]:
                     for skip_pattern in SKIP_OPERATIONS:
                         if skip_pattern.lower() in low:
                             should_skip = True
-                            logger.debug("Skipping operation by SKIP_OPERATIONS match: %s (pattern=%s)", label_source,
-                                         skip_pattern)
+                            logger.debug("Skipping operation by SKIP_OPERATIONS match: %s (pattern=%s)",
+                                         label_source, skip_pattern)
                             break
 
                 # также пропускаем пустые операции с нулевыми суммами
@@ -369,13 +360,13 @@ def _parse_root(root: ET.Element) -> Tuple[List[OperationDTO], Dict[str, Any]]:
                     skipped_count += 1
                     continue
 
-                # 2) Определение operation_type с новой логикой
+                # 2) Определение operation_type через новую систему маппинга
                 mapped_type = _determine_operation_type(oper_type_val, comment_text, payment_sum)
 
                 # Специальная метка для пропуска
                 if mapped_type == "_skip_":
                     skipped_count += 1
-                    logger.debug("Skipping operation: %s (промежуточные дивиденды)", comment_text[:50])
+                    logger.debug("Skipping operation: %s", comment_text[:50])
                     continue
 
                 # date field prefer settlement_date else rn_last_update
@@ -386,14 +377,14 @@ def _parse_root(root: ET.Element) -> Tuple[List[OperationDTO], Dict[str, Any]]:
                     operation_type=mapped_type,
                     payment_sum=payment_sum,
                     currency=currency or "",
-                    ticker=ticker or "",
-                    isin=isin or "",
-                    reg_number=reg_number or "",
+                    ticker=ticker,
+                    isin=isin,
+                    reg_number=reg_number,
                     price=0.0,
                     quantity=0,
                     aci=0.0,
-                    comment=comment_text or "",
-                    operation_id=operation_id or "",
+                    comment=comment_text,
+                    operation_id="",  # Не используется для финансовых операций
                     commission=commission_val,
                 )
 
@@ -401,11 +392,13 @@ def _parse_root(root: ET.Element) -> Tuple[List[OperationDTO], Dict[str, Any]]:
 
                 # --- accumulate totals ---
                 try:
-                    totals_by_mapped_type[mapped_type] = totals_by_mapped_type.get(mapped_type, Decimal("0")) + amount_decimal
+                    totals_by_mapped_type[mapped_type] = totals_by_mapped_type.get(mapped_type,
+                                                                                   Decimal("0")) + amount_decimal
                 except Exception:
                     totals_by_mapped_type[mapped_type] = Decimal("0") + amount_decimal
 
-                label_key = (oper_type_val or "").strip() or (comment_text.splitlines()[0].strip() if comment_text else "")
+                label_key = (oper_type_val or "").strip() or (
+                    comment_text.splitlines()[0].strip() if comment_text else "")
                 if label_key:
                     totals_by_label[label_key] = totals_by_label.get(label_key, Decimal("0")) + amount_decimal
 
@@ -424,7 +417,7 @@ def _parse_root(root: ET.Element) -> Tuple[List[OperationDTO], Dict[str, Any]]:
             "error": str(e)
         }
 
-    # prepare readable dicts (Decimal -> str with 10 decimals)
+    # prepare readable dicts (Decimal -> str with 4 decimals)
     amounts_by_mapped_type_out = {k: _dec_to_str(v) for k, v in totals_by_mapped_type.items()}
     amounts_by_label_out = {k: _dec_to_str(v) for k, v in totals_by_label.items()}
 

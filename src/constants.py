@@ -1,18 +1,6 @@
 from typing import Any
 
-#  Валидные операции, которые обрабатываются
-VALID_OPERATIONS = {
-    "Вознаграждение компании",
-    "Дивиденды",
-    "НДФЛ",
-    "Погашение купона",
-    "Погашение облигации",
-    "Приход ДС",
-    "Частичное погашение облигации",
-    "Вывод ДС",
-}
-
-#  Операции, которые нужно игнорировать
+# Операции, которые нужно игнорировать (уже учтены в сделках)
 SKIP_OPERATIONS = {
     "Расчеты по сделке",
     "Комиссия по сделке",
@@ -22,25 +10,21 @@ SKIP_OPERATIONS = {
     "Переводы между площадками",
 }
 
-#  Маппинг строковых названий операций на типы
+# Прямой маппинг названий операций на типы
 OPERATION_TYPE_MAP = {
     "Дивиденды": "dividend",
     "Купонный доход": "coupon",
+    "Погашение купона": "coupon",
     "Погашение облигации": "repayment",
-    "Приход ДС": "deposit",
+    "Полное погашение номинала": "repayment",
     "Частичное погашение облигации": "amortization",
+    "Частичное погашение номинала": "amortization",
+    "Приход ДС": "deposit",
     "Вывод ДС": "withdrawal",
+    "Вознаграждение компании": "other_income",
 }
 
-#  Обработка операций, тип которых зависит от контекста (доход/расход)
-SPECIAL_OPERATION_HANDLERS = {
-    'Проценты по займам "овернайт"': lambda i, e: "other_income" if is_nonzero(i) else "other_expense",
-    'Проценты по займам "овернайт ЦБ"': lambda i, e: "other_income" if is_nonzero(i) else "other_expense",
-    "Комиссия по сделке": lambda i, e: "commission_refund" if is_nonzero(i) else "commission",
-    "НДФЛ": lambda i, e: "refund" if is_nonzero(i) else "withholding",
-}
-
-
+# Валюты
 CURRENCY_DICT = {
     "AED": "AED", "AMD": "AMD", "BYN": "BYN", "CHF": "CHF", "CNY": "CNY",
     "EUR": "EUR", "GBP": "GBP", "HKD": "HKD", "JPY": "JPY", "KGS": "KGS",
@@ -49,12 +33,12 @@ CURRENCY_DICT = {
     "XAG": "XAG", "XAU": "XAU", "ZAR": "ZAR"
 }
 
-
-def is_nonzero(value: Any) -> bool:
+def is_negative(value: Any) -> bool:
     """
-    Проверка на значение, отличное от нуля.
+    Проверяет, что значение — отрицательное число.
     """
     try:
-        return float(str(value).replace(",", ".").replace(" ", "")) != 0
+        num = float(str(value).replace(",", ".").replace(" ", ""))
+        return num < 0
     except (ValueError, TypeError):
         return False
