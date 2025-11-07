@@ -9,6 +9,7 @@ import logging
 
 from src.OperationDTO import OperationDTO
 from src.constants import SKIP_OPERATIONS, OPERATION_TYPE_MAP
+from src.utils import _local_name
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -38,14 +39,6 @@ DYNAMIC_TYPE_HANDLERS: Dict[str, Callable[[str, float, str], str]] = {
     "Комиссия": lambda name, amount, comment: "commission_refund" if amount > 0 else "commission",
     "Проценты по займам": lambda name, amount, comment: "other_income" if amount != 0 else "other_expense",
 }
-
-
-# --- helpers ---
-def _local_name(tag: str) -> str:
-    """Return local name of element tag, without namespace."""
-    if tag is None:
-        return ""
-    return tag.split("}")[-1] if "}" in tag else tag
 
 
 def _safe_attr(elem: Optional[ET.Element], name: str) -> Optional[str]:

@@ -6,17 +6,10 @@ import re
 from datetime import datetime
 from pathlib import Path
 from src.OperationDTO import OperationDTO
-from src.utils import logger, to_float_safe
+from src.utils import logger, to_float_safe, _local_name, _normalize_attrib, extract_isin_from_attr
 
 ISIN_RE = re.compile(r"[A-Z]{2}[A-Z0-9]{9}\d", re.IGNORECASE)
 DATE_TIME_RE = re.compile(r"\d{2}\.\d{2}\.\d{4}\s+\d{2}:\d{2}:\d{2}")
-
-
-def _local_name(tag: str) -> str:
-    """Возвращает локальное имя тега без namespace."""
-    if tag is None:
-        return ""
-    return tag.split("}")[-1] if "}" in tag else tag
 
 
 def parse_datetime_from_settlement(settlement_date: Optional[str], settlement_time: Optional[str]) -> Optional[
@@ -64,29 +57,6 @@ def parse_datetime_from_settlement(settlement_date: Optional[str], settlement_ti
                 return datetime.strptime(settlement_date, "%Y-%m-%d")
         except Exception:
             return None
-
-
-def extract_isin_from_p_name(p_name: Optional[str]) -> str:
-    """
-    Извлекает ISIN из p_name.
-    Примеры:
-      "Сибирское Стекло БО-П03 RU000A105C93" -> "RU000A105C93"
-      "МКПАО Озон RU000A10CW95" -> "RU000A10CW95"
-      "Ozon Holdings PLC, ADR USD, адр. US69269L1044" -> "US69269L1044"
-    """
-    if not p_name:
-        return ""
-
-    m = ISIN_RE.search(str(p_name))
-    if m:
-        return m.group(0).upper()
-
-    return ""
-
-
-def _normalize_attrib(attrib: Dict[str, str]) -> Dict[str, str]:
-    """Нормализация атрибутов: приводим ключи к lowercase."""
-    return {k.lower(): v for k, v in attrib.items()}
 
 
 def parse_transfers_from_xml(path_or_bytes: str | bytes) -> Tuple[List[OperationDTO], Dict[str, Any]]:
@@ -175,7 +145,7 @@ def parse_transfers_from_xml(path_or_bytes: str | bytes) -> Tuple[List[Operation
 
             # Извлекаем ISIN из p_name
             p_name = attrib.get("p_name") or ""
-            isin = extract_isin_from_p_name(p_name)
+            isin = extract_isin_from_attr(p_name)
 
             # Место проведения операции
             place_name = attrib.get("place_name") or ""

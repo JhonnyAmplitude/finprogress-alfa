@@ -6,26 +6,10 @@ import re
 from datetime import datetime
 from pathlib import Path
 from src.OperationDTO import OperationDTO
-from src.utils import logger, to_float_safe
+from src.utils import logger, to_float_safe, _local_name, _normalize_attrib, extract_isin_from_attr, to_int_safe
 
-ISIN_RE = re.compile(r"[A-Z]{2}[A-Z0-9]{9}\d", re.IGNORECASE)
 DATE_TIME_RE = re.compile(r"\d{2}\.\d{2}\.\d{4}\s+\d{2}:\d{2}:\d{2}")
 DATE_TIME_SHORT_RE = re.compile(r"\d{2}\.\d{2}\.\d{4}\s+\d{2}:\d{2}")
-
-
-def _local_name(tag: str) -> str:
-    """Возвращает локальное имя тега без namespace."""
-    if tag is None:
-        return ""
-    return tag.split("}")[-1] if "}" in tag else tag
-
-
-def to_int_safe(v: Any) -> int:
-    try:
-        f = to_float_safe(v)
-        return int(round(float(f)))
-    except Exception:
-        return 0
 
 
 def parse_datetime_from_text(s: Optional[str]) -> Optional[datetime]:
@@ -51,13 +35,6 @@ def parse_datetime_from_text(s: Optional[str]) -> Optional[datetime]:
         except Exception:
             continue
     return None
-
-
-def extract_isin_from_attr(s: Optional[str]) -> str:
-    if not s:
-        return ""
-    m = ISIN_RE.search(str(s))
-    return m.group(0).upper() if m else str(s).strip()
 
 
 def extract_ticker_from_name(name: Optional[str]) -> str:
@@ -91,10 +68,6 @@ def extract_first_trade_no(trade_no_raw: Optional[str]) -> str:
         return parts[0].strip()
 
     return ""
-
-
-def _normalize_attrib(attrib: Dict[str, str]) -> Dict[str, str]:
-    return {k.lower(): v for k, v in attrib.items()}
 
 
 def parse_trades_from_xml(path_or_bytes: str | bytes) -> Tuple[List[OperationDTO], Dict[str, Any]]:
@@ -199,7 +172,7 @@ def parse_trades_from_xml(path_or_bytes: str | bytes) -> Tuple[List[OperationDTO
                     quantity=int(round(abs(float(qty)))),
                     aci=nkd,
                     comment=str(attrib.get("place_name") or attrib.get("place") or ""),
-                    operation_id=trade_no,  # Только первый номер
+                    operation_id=trade_no,
                     commission=float(commission),
                 )
                 ops.append(dto)
@@ -208,9 +181,7 @@ def parse_trades_from_xml(path_or_bytes: str | bytes) -> Tuple[List[OperationDTO
                 logger.exception("Failed to build OperationDTO for attrs %s: %s", attrib, e)
                 stats["skipped_invalid"] += 1
 
-            # clear element to free memory
             elem.clear()
-        # end for iterparse
 
     except Exception as e:
         logger.exception("XML parsing failed: %s", e)
