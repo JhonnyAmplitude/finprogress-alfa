@@ -5,6 +5,7 @@ from datetime import datetime
 
 from src.parsers.xml_trades import parse_trades_from_xml
 from src.parsers.xml_fin_ops import parse_fin_operations_from_xml
+from src.parsers.xml_transfers import parse_transfers_from_xml
 from src.utils import logger
 from src.OperationDTO import OperationDTO
 
@@ -24,7 +25,6 @@ def _op_key(op: OperationDTO) -> str:
         date_part = op.date.isoformat()
     else:
         date_part = str(op.date or "")
-    # payment_sum might be str or float
     try:
         sum_part = float(op.payment_sum) if op.payment_sum not in (None, "") else 0.0
     except Exception:
@@ -78,7 +78,7 @@ def _sort_key_for_operation(op_dict: Dict[str, Any]) -> tuple:
 
 def parse_full_statement_xml(path_or_bytes: Union[str, bytes]) -> Dict[str, Any]:
     """
-    Parse trades + financial operations from XML source (path or bytes).
+    Parse trades + financial operations + transfers (conversions) from XML source (path or bytes).
     Возвращает операции отсортированные по дате.
     """
     logger.info("Starting full XML parse for %s", str(path_or_bytes)[:200])
@@ -95,49 +95,56 @@ def parse_full_statement_xml(path_or_bytes: Union[str, bytes]) -> Dict[str, Any]
         logger.error("XML financial ops parser error: %s", fin_stats.get("error"))
         return {"operations": [], "meta": {"error": fin_stats.get("error")}}
 
-    # raw counts (as reported by parsers)
+    # --- parse transfers (conversions) ---
+    transfers, transfer_stats = parse_transfers_from_xml(path_or_bytes)
+    if isinstance(transfer_stats, dict) and transfer_stats.get("error"):
+        logger.error("XML transfers parser error: %s", transfer_stats.get("error"))
+        # Не фатальная ошибка — продолжаем без transfer'ов
+        transfers = []
+        transfer_stats = {"parsed": 0, "total_rows": 0}
+
+    # raw counts
     trade_raw_count = int(trade_stats.get("total_rows", len(trades)))
     fin_raw_count = int(fin_stats.get("total_rows", len(fin_ops)))
+    transfer_raw_count = int(transfer_stats.get("total_rows", len(transfers)))
 
     # dedupe within each group
     deduped_fin, after_dedupe_fin = _dedupe_ops(fin_ops)
     deduped_trades, after_dedupe_trades = _dedupe_ops(trades)
+    deduped_transfers, after_dedupe_transfers = _dedupe_ops(transfers)
 
-    # combine operations: финансовые операции + сделки
-    combined_ops_dto = deduped_fin + deduped_trades
+    # combine all: финоперации + сделки + переводы/конвертации
+    combined_ops_dto = deduped_fin + deduped_trades + deduped_transfers
 
-    # Конвертируем в словари
+    # convert to dicts
     combined_ops = [o.to_dict() for o in combined_ops_dto]
 
-    # Сортируем по дате
+    # sort by date
     try:
         combined_ops.sort(key=_sort_key_for_operation)
         logger.info("Operations sorted by date successfully")
     except Exception as e:
         logger.warning("Failed to sort operations by date: %s", e)
-        # Продолжаем работу с несортированными операциями
 
-    # meta assembly
+    # meta
     meta: Dict[str, Any] = {
         "fin_ops_raw_count": fin_raw_count,
         "trade_ops_raw_count": trade_raw_count,
+        "transfer_ops_raw_count": transfer_raw_count,
         "total_ops_count": len(combined_ops),
         "fin_ops_stats": fin_stats,
         "trade_ops_stats": trade_stats,
+        "transfer_ops_stats": transfer_stats,
         "after_dedupe_from_fin": after_dedupe_fin,
         "after_dedupe_from_trade": after_dedupe_trades,
+        "after_dedupe_from_transfer": after_dedupe_transfers,
     }
 
-    # helper short summary log similar to CLI output
     logger.info(
-        "%s parsed: fin=%s (raw=%s -> deduped=%s), trades=%s (raw=%s -> deduped=%s), total_ops=%s (sorted by date)",
-        "XML full parse summary",
-        meta["fin_ops_stats"].get("parsed", len(deduped_fin)),
-        fin_raw_count,
-        after_dedupe_fin,
-        meta["trade_ops_stats"].get("parsed", len(deduped_trades)),
-        trade_raw_count,
-        after_dedupe_trades,
+        "XML full parse summary: fin=%s, trades=%s, transfers=%s → total_ops=%s (sorted)",
+        meta["fin_ops_stats"].get("parsed", 0),
+        meta["trade_ops_stats"].get("parsed", 0),
+        meta["transfer_ops_stats"].get("parsed", 0),
         meta["total_ops_count"],
     )
 

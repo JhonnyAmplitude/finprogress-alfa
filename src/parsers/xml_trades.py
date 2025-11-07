@@ -6,7 +6,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 from src.OperationDTO import OperationDTO
-from src.utils import logger
+from src.utils import logger, to_float_safe
 
 ISIN_RE = re.compile(r"[A-Z]{2}[A-Z0-9]{9}\d", re.IGNORECASE)
 DATE_TIME_RE = re.compile(r"\d{2}\.\d{2}\.\d{4}\s+\d{2}:\d{2}:\d{2}")
@@ -18,22 +18,6 @@ def _local_name(tag: str) -> str:
     if tag is None:
         return ""
     return tag.split("}")[-1] if "}" in tag else tag
-
-
-def to_float_safe(v: Any) -> float:
-    if v is None:
-        return 0.0
-    try:
-        s = str(v).strip()
-        if s in ("", "-", "--"):
-            return 0.0
-        s = s.replace("\u00A0", " ").replace(" ", "").replace(",", ".")
-        return float(s)
-    except Exception:
-        try:
-            return float(str(v).replace(",", "."))
-        except Exception:
-            return 0.0
 
 
 def to_int_safe(v: Any) -> int:

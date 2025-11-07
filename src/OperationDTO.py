@@ -12,7 +12,7 @@ class OperationDTO:
     isin: Optional[str] = ""
     reg_number: Optional[str] = ""
     price: Optional[float] = 0.0
-    quantity: Optional[int] = 0
+    quantity: Union[int, float] = 0.0
     aci: Optional[Union[str, float]] = 0.0
     comment: Optional[str] = ""
     operation_id: Optional[str] = ""
@@ -26,6 +26,12 @@ class OperationDTO:
             self._sort_key = str(self.date)
         else:
             self._sort_key = ""
+
+        if isinstance(self.quantity, str):
+            try:
+                self.quantity = float(self.quantity.replace(',', '.'))
+            except Exception:
+                self.quantity = 0.0
 
         if isinstance(self.aci, str):
             try:

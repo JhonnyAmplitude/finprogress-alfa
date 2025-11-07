@@ -54,6 +54,21 @@ def to_num_safe(v: Any) -> float:
         except Exception:
             return 0.0
 
+def to_float_safe(v: Any) -> float:
+    if v is None:
+        return 0.0
+    try:
+        s = str(v).strip()
+        if s in ("", "-", "--"):
+            return 0.0
+        s = s.replace("\u00A0", " ").replace(" ", "").replace(",", ".")
+        return float(s)
+    except Exception:
+        try:
+            return float(str(v).replace(",", "."))
+        except Exception:
+            return 0.0
+
 
 def to_int_safe(v: Any) -> int:
     """
